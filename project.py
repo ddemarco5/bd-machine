@@ -415,8 +415,8 @@ class Project:
                     print(f"We've previously profiled point {crf}, skipping")
                     continue
                 print(f"Profiling video with crf: {crf}")
-                # self.ui.update_episode(str(ep.ep_num))
-                self.ui.update_episode(ep, len(profile_eps))
+                # pass stepsize here to record how many crf steps we are about to profile
+                self.ui.update_episode(ep, stepsize)
                 result = encode_video(ep,
                             out_path=workpath,
                             crf=crf,
