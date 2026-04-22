@@ -1,3 +1,14 @@
+# Pickled stuff
+*.pkl
+
+# work directories
+/workspace/
+/encoded/
+/fonts/
+/profile/
+/cq_test_workspace/
+/test/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

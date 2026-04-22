@@ -1,8 +1,18 @@
 import os
-import subprocess
 from pathlib import Path
 
-def encode_audio(episode, out_path, profile) -> None:
+import constants
+from ui import UIManager
+from ui_redirector import FFmpegOutputHandler
+
+
+def _run(command, ui_manager: UIManager, episode_duration_ms: float = 0) -> int:
+    """Run `command` via FFmpegOutputHandler, streaming output to the UI."""
+    str_command = [str(c) for c in command]
+    handler = FFmpegOutputHandler(ui_manager, episode_duration_ms=episode_duration_ms)
+    return handler.run_command(str_command, shell=False)
+
+def encode_audio(episode, out_path, profile, ui_manager: UIManager) -> None:
     filename = "aud" + str(episode.ep_num) + ".mkv"
     
     command = ["ffmpeg", "-y",
@@ -17,23 +27,22 @@ def encode_audio(episode, out_path, profile) -> None:
                "-map", "a:" + str(episode.aud_track),
                "-map_metadata", "-1",
                (out_path / filename).absolute()]
-    result = subprocess.run(command, shell=(os.name == "nt"), check=True)
-    if result.returncode != 0:
-        print(f"non-zero retcode: {result.returncode}")
-        exit(result.returncode)
+    if _run(command, ui_manager) != 0:
+        return None
     # ffmpeg aac bug, stream size isn't correctly written to output file.
     # we need to run mkvpropedit to manually correct this.
     # This is safe to do blindly because the tool is included with mkvtoolsnix
     command = ["mkvpropedit",
                (out_path / filename).absolute(),
                "--add-track-statistics-tags"]
-    subprocess.run(command, shell=(os.name == "nt"), check=True)
+    if _run(command, ui_manager) != 0:
+        return None
     return out_path / filename
 
-def extract_elementary_dts_audio(episode, out_path, profile) -> None:
+def extract_elementary_dts_audio(episode, out_path, profile, ui_manager: UIManager) -> None:
     filename = "aud" + str(episode.ep_num) + ".dts"
     
-    command = ["ffmpeg", "-y",
+    command = ["ffmpeg", "-y",     
                "-v", "quiet",
                "-stats",
                "-i", episode.aud_src.absolute(),
@@ -41,13 +50,11 @@ def extract_elementary_dts_audio(episode, out_path, profile) -> None:
                "-c:a", "copy", 
                "-bsf:a", "dca_core",
                (out_path / filename).absolute()]
-    result = subprocess.run(command, shell=(os.name == "nt"), check=True)
-    if result.returncode != 0:
-        print(f"non-zero retcode: {result.returncode}")
-        exit(result.returncode)
+    if _run(command, ui_manager) != 0:
+        return None
     return out_path / filename
 
-def encode_video(episode, out_path, profile, crf, hardsub, fontsdir, start_time=None, stop_time=None, cropstring=None, scalestring=None, videotune=None, keephdr=False) -> None:
+def encode_video(episode, out_path, profile, crf, hardsub, fontsdir, ui_manager: UIManager, start_time=None, stop_time=None, cropstring=None, scalestring=None, videotune=None, keephdr=False) -> None:
   
     filename = "vid" + str(episode.ep_num)
     if keephdr:
@@ -76,7 +83,11 @@ def encode_video(episode, out_path, profile, crf, hardsub, fontsdir, start_time=
         gpustring += ",disable_multiplane=1"
     
     if profile.video_codec == "hevc_nvenc":
-        command = ["ffmpeg", "-y",
+        # NVENC -cq is 8.8 fixed-point but the driver only honors the top 2 bits
+        # of the fractional byte (see constants.NVENC_CQ_STEP). Quantize here so
+        # every caller passes a value the encoder can actually act on.
+        crf = round(crf / constants.NVENC_CQ_STEP) * constants.NVENC_CQ_STEP
+        command = ["ffmpeg", "-y",      
                 "-v", "quiet",
                 "-hide_banner",
                 "-stats",
@@ -193,13 +204,13 @@ def encode_video(episode, out_path, profile, crf, hardsub, fontsdir, start_time=
     # print(command)
     # exit()
     
-    result = subprocess.run(command, shell=(os.name == "nt"), check=True)
-    if result.returncode != 0:
-        print(f"non-zero retcode for encode: {result.returncode}")
-        exit(result.returncode)
+    result = _run(command, ui_manager, episode_duration_ms=episode.duration_src)
+    if result != 0:
+        print(f"non-zero retcode for encode: {result}")
+        exit(result)
     return out_path / filename
 
-def mkv_extract(infile, content, output_path, track_ids, track_names):
+def mkv_extract(infile, content, output_path, track_ids, track_names, ui_manager: UIManager):
     if len(track_ids) is not len(track_names):
         print("Error, track_ids is not the same len as track_names")
         print(track_ids)
@@ -216,12 +227,12 @@ def mkv_extract(infile, content, output_path, track_ids, track_names):
     # print(command)
     # exit()
     
-    result = subprocess.run(command, shell=(os.name == "nt"), check=True)
-    if result.returncode != 0:
-        print(f"non-zero retcode for mux: {result.returncode}")
-        exit(result.returncode)
+    result = _run(command, ui_manager)
+    if result != 0:
+        print(f"non-zero retcode for extract: {result}")
+        exit(result)
 
-def mux_mkv(episode, out_path, hardsub=False) -> None:
+def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub=False) -> None:
     # We want 2 digts for our episode number string unless we need more
     if episode.ep_num <= 99:
         ep_num_str = "{:02d}".format(int(episode.ep_num))
@@ -271,9 +282,8 @@ def mux_mkv(episode, out_path, hardsub=False) -> None:
     # print(command)
     # exit()
     
-    result = subprocess.run(command, shell=(os.name == "nt"), check=True)
-    if result.returncode != 0:
-        print(f"non-zero retcode for mux: {result.returncode}")
-        exit(result.returncode)
+    result = _run(command, ui_manager)
+    if result != 0:
+        print(f"non-zero retcode for mux: {result}")
+        exit(result)
     return outfile
-    

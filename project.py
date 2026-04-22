@@ -1,4 +1,5 @@
 import os
+import sys
 import pickle
 from pymediainfo import MediaInfo
 
@@ -14,6 +15,7 @@ from commands import *
 from episode import Episode
 from models import Model,ModelType
 from source import Source
+from ui import UIManager
 
 
 class Project:
@@ -25,8 +27,9 @@ class Project:
         PROFILE = auto()
         PROCESSING = auto()
         DONE = auto()
-    def __init__(self, name = "project"):
+    def __init__(self, name="project", ui_manager=None):
         self.name = name
+        self.ui = ui_manager
         self.project_state = self.state.NEW 
         self.workdir = None
         self.outputdir = None
@@ -62,28 +65,33 @@ class Project:
         # The fine-tune linear model
         self.fine_tune_model = Model(ModelType.LINEAR, maxsize=4)
 
-    
     # Pickle stuff
     def __reduce__(self):
         # Return a tuple of the callable and the arguments to recreate the object
-        return (self.__class__, (), self.__dict__)
+        # Exclude 'ui' from pickled state - it gets re-injected on load
+        state = {k: v for k, v in self.__dict__.items() if k != 'ui'}
+        return (self.__class__, (), state)
 
     def __setstate__(self, state):
         # Restore the instance's state from the state dictionary
         self.__dict__.update(state)
 
     @classmethod
-    def load_or_build(cls, filename):
+    def load_or_build(cls, filename, ui_manager=None):
         pickle_file = f"{filename}.pkl"
         # Load the class from a file
         if os.path.exists(pickle_file):
-            print(f"Loading project from {pickle_file}")
+            msg = f"Loading project from {pickle_file}"
+            print(msg)
             with open(pickle_file, "rb") as f:
                 instance = pickle.load(f)
+            # Inject the UI manager into loaded instance
+            instance.ui = ui_manager
             return instance
         else:
-            print(f"{pickle_file} wasn't found, creating a new project")
-            return cls(filename)
+            msg = f"{pickle_file} wasn't found, creating a new project"
+            print(msg)
+            return cls(filename, ui_manager=ui_manager)
         
     def save(self):
         print("Saving project to file")
@@ -309,7 +317,8 @@ class Project:
                 if not subnames:
                     print(f"{e.ep_num} does not have subtitle attachments")
                 else:
-                    mkv_extract(e.sub_src, "attachments", self.fonts_dir, list(range(1,len(subnames)+1)), subnames)
+                    mkv_extract(e.sub_src, "attachments", self.fonts_dir, list(range(1,len(subnames)+1)), subnames,
+                                ui_manager=self.ui)
             # TODO: Intelligent extraction/conversion if subtitles aren't the correct type (srt)
             if (e.sub_src.suffix == ".mkv") and self.hardsub:    
                 # Calculate the total number of media tracks before subtitles bc mkvextract indexes them all together
@@ -323,7 +332,8 @@ class Project:
                             "tracks",
                             self.workdir,
                             [sub_track_to_extract],
-                            [filename])
+                            [filename],
+                            ui_manager=self.ui)
                 
                 # now that the subs/fonts have been extracted, we can mark them as the final source to be muxxed
                 e.sub_enc = (self.workdir / filename)
@@ -338,9 +348,11 @@ class Project:
         
     def encode_vid(self, ep: Episode, crf, force=False):
         if ep.vid_enc and not force:
-                print(f"Encoded video file found at {ep.vid_enc}, skipping...")
-                return
+            print(f"Encoded video file found at {ep.vid_enc}, skipping...")
+            return
         print(f"Encoding video {ep.ep_num} - {ep.ep_name}")
+        self.ui.update_episode(ep, len(self.episodes))
+        self.ui.update_status(f"Starting encode with CRF {crf:.2f}")
         result = encode_video(ep,
                          out_path=self.workdir,
                          crf=crf,
@@ -350,17 +362,19 @@ class Project:
                          cropstring=self.cropstring,
                          scalestring=self.scalestring,
                          videotune=self.videotune,
-                         keephdr=self.hdr)
+                         keephdr=self.hdr,
+                         ui_manager=self.ui)
         if not result:
             print("fatal error encoding video")
             exit(1)
         ep.vid_enc = result
-        
+
         print(f"Saved encoded video to {ep.vid_enc}")
+        self.ui.update_episode_progress(100.0)
         self.save()
         
     def finalize_episode(self, ep: Episode):
-            ret = mux_mkv(ep, self.outputdir, self.hardsub)
+            ret = mux_mkv(ep, self.outputdir, ui_manager=self.ui, hardsub=self.hardsub)
             if ret:
                 print(f"Marked episode {ep.ep_name} as finalized")
                 ep.final = ret
@@ -401,6 +415,8 @@ class Project:
                     print(f"We've previously profiled point {crf}, skipping")
                     continue
                 print(f"Profiling video with crf: {crf}")
+                # self.ui.update_episode(str(ep.ep_num))
+                self.ui.update_episode(ep, len(profile_eps))
                 result = encode_video(ep,
                             out_path=workpath,
                             crf=crf,
@@ -411,7 +427,8 @@ class Project:
                             stop_time="01:00:00",
                             scalestring=self.scalestring,
                             cropstring=self.cropstring,
-                            keephdr=self.hdr)
+                            keephdr=self.hdr,
+                            ui_manager=self.ui)
                             #stop_time="00:05:00") # Low value for testing
                 if not result.is_file():
                     print("fatal error encoding video")
@@ -457,7 +474,8 @@ class Project:
                         print(f"Fancy DTS \"{audformat_other}\" detected, extracting elementary DTS")
                         result = extract_elementary_dts_audio(e,
                             out_path=self.workdir,
-                            profile=self.profile)
+                            profile=self.profile,
+                            ui_manager=self.ui)
                         if not result:
                             print("Fatal error encoding audio")
                             exit(1)
@@ -474,7 +492,8 @@ class Project:
                 print(f"Encoding episode {e.ep_num} audio")
                 result = encode_audio(e,
                             out_path=self.workdir,
-                            profile=self.profile)
+                            profile=self.profile,
+                            ui_manager=self.ui)
                 # save audio file to episode class
                 if not result:
                     print("Fatal error encoding audio")
@@ -575,21 +594,51 @@ class Project:
             print(f"Resuming previously stopped processing with crf of {self.current_crf}")
         
             
+        # hevc_nvenc can only actually act on CQ values at constants.NVENC_CQ_STEP
+        # granularity (driver honors only the top 2 bits of the 8.8 fixed-point
+        # fractional byte). If our newly-computed CQ rounds to the same quantum
+        # as last time, encoding again would produce an identical file — detect
+        # and handle that stall here.
+        if self.profile.video_codec == "hevc_nvenc" and self.last_attempted_crf is not None:
+            q = constants.NVENC_CQ_STEP
+            prev_q = round(self.last_attempted_crf / q) * q
+            next_q = round(self.current_crf / q) * q
+            if next_q == prev_q:
+                if self.last_percent_off is not None and self.last_percent_off <= 0:
+                    # Undersized and can't tighten further without re-encoding the same thing.
+                    print(f"Stalled at CQ {prev_q} (undersized by {self.last_percent_off*100:.2f}%). Accepting as final.")
+                    return True
+                # Oversized stall: force one quantum step up (higher CQ -> smaller file).
+                self.current_crf = prev_q + q
+                print(f"Stalled at CQ {prev_q} while oversized; bumping to {self.current_crf}")
+
         print(f"Encoding the project with a crf of {self.current_crf}, last attempted was {self.last_attempted_crf}")
         self.encode_episodes(self.eps_to_process, self.current_crf)
         self.last_attempted_crf = self.current_crf
         self.last_percent_off = self.check_size_threshhold()
+        self.ui.append_history(self.last_percent_off)
         # check_size_threshhold sets self.total_project_size, we can use it to calculate the data for our fine-tuner
         project_bitrate = (self.total_project_size * 8) / self.total_duration # we want this in bits/s
         self.fine_tune_model.add_data_point(self.last_attempted_crf, project_bitrate)
         return False
         # We're all set to loop another time
-        
+
     # This is where we'll spawn a server and distribute work.
     # For now we just do it locally
     def encode_episodes(self, episode_list, crf):
+        total_eps = len(self.episodes)
+        current_idx = total_eps - len(episode_list) + 1
+
+        # Add a new line here to print the current episode index
+        print(f"Processing episode {current_idx} of {total_eps}")
+
         while episode_list:
             e = episode_list[0] # get a ref to the first element
+
+            # Update overall progress
+            self.ui.update_overall_progress(current_idx, total_eps)
+            self.ui.update_status(f"CRF {crf:.2f} | Processing {e.ep_name}")
+
             # We haven't encoded
             if not e.vid_enc:
                 self.encode_vid(e, crf)
@@ -599,6 +648,7 @@ class Project:
                 self.finalize_episode(e)
                 # if everything went well, this is where we can remove the episode from the list
                 episode_list.pop(0)
+                current_idx += 1
                 self.save()
                 
 
@@ -608,18 +658,21 @@ class Project:
         while self.project_state is not self.state.DONE:
             # The project hasn't been started
             if self.project_state is self.state.NEW:
+                self.ui.update_status("Scanning media files...")
                 # We need to scan the episodes to get our info
                 self.scan_episodes()
                 self.project_state = self.state.AUDIO
                 self.save()
                 continue
             elif self.project_state is self.state.AUDIO:
+                self.ui.update_status("Processing audio streams...")
                 # Encode or verify our audio streams
                 self.process_audio()
                 self.project_state = self.state.SUBS
                 self.save()
                 continue
             elif self.project_state is self.state.SUBS:
+                self.ui.update_status("Extracting subtitles and fonts...")
                 # Process our subtitles
                 self.extract_subs_and_fonts()
                 self.project_state = self.state.PROFILE
@@ -628,6 +681,7 @@ class Project:
             elif self.project_state is self.state.PROFILE:
                 # profile our video if we haven't yet
                 if not crf_hint:
+                    self.ui.update_status("Profiling CRF curve...")
                     self.profile_crf_curve()
                 else:
                     print("We have a crf hint, no need to profile")
@@ -635,14 +689,18 @@ class Project:
                 self.save()
                 continue
             elif self.project_state is self.state.PROCESSING:
+                self.ui.update_status("Beginning video encoding...")
                 while (not self.approach_threshhold(crf_hint)):
                     self.num_iterations += 1
                     self.save()
                 self.project_state = self.state.DONE
                 self.save()
-                continue 
+                continue
             else:
                 print("invalid state")
                 exit(1)
-            print(f"Yay we're done after {self.num_iterations} tries")
-            exit(0)
+
+        print(f"Yay we're done after {self.num_iterations} tries")
+        self.ui.update_status("Complete!")
+        self.ui.update_episode_progress(100.0)
+        self.ui.update_overall_progress(len(self.episodes), len(self.episodes))

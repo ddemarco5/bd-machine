@@ -1,6 +1,8 @@
+import warnings
 from enum import Enum
 import numpy as np
-from scipy.optimize import curve_fit,root_scalar
+from scipy.optimize import curve_fit, root_scalar
+from scipy.optimize import OptimizeWarning
 
 # Power function that seems to best fit CRF to bitrate relationship
 def power_function(x,a,b):
@@ -14,19 +16,32 @@ def linear_function(x,a,b):
 def calculate_r_squared(y_observed, y_predicted):
     ss_res = np.sum((y_observed - y_predicted) ** 2)        # Sum of squares of residuals
     ss_tot = np.sum((y_observed - np.mean(y_observed)) ** 2) # Total sum of squares
+    # If every observed y is identical, variance is zero and R^2 is undefined.
+    # Treat a perfect-fit (ss_res ~ 0) case as R^2 = 1, otherwise R^2 = 0.
+    if ss_tot == 0:
+        return 1.0 if ss_res == 0 else 0.0
     return 1 - (ss_res / ss_tot)
+
+def _safe_curve_fit(func, x_data, y_data):
+    # Silences the 'Covariance of the parameters could not be estimated'
+    # OptimizeWarning emitted when n_points <= n_params. We don't use the
+    # covariance matrix, so the warning is noise for our use case.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", OptimizeWarning)
+        params, _ = curve_fit(func, x_data, y_data)
+    return params
 
 def fit_power_function(x_data, y_data):
     # Fit the power function to the data
-    params, _ = curve_fit(power_function, x_data, y_data)
+    params = _safe_curve_fit(power_function, x_data, y_data)
     print(f"Fitted Power Curve: y = {params[0]:.2f} x^{params[1]:.2f}")
     r = calculate_r_squared(y_data, power_function(x_data, *params))
     print(f"r^2: {r}")
     return params[0],params[1],r
 
 def fit_linear_function(x_data, y_data):
-    # Fit the power function to the data
-    params, _ = curve_fit(linear_function, x_data, y_data)
+    # Fit the linear function to the data
+    params = _safe_curve_fit(linear_function, x_data, y_data)
     print(f"Fitted Linear eq : y = {params[0]:.2f} x + {params[1]:.2f}")
     r = calculate_r_squared(y_data, linear_function(x_data, *params))
     print(f"r^2: {r}")
@@ -56,6 +71,11 @@ class Model:
         self.crf_data = np.append(self.crf_data, crf)
         self.bitrate_data = np.append(self.bitrate_data, bitrate)
         # re-fit our curve and re-calculate r^2
+        # A line through 2 points is a perfect (exact) fit and still gives a
+        # useful trajectory, so we allow linear fits from >= 2 points. The
+        # OptimizeWarning about undefined covariance in that degenerate case
+        # is suppressed inside _safe_curve_fit. Power is noisier so we wait
+        # for >= 4 points before fitting.
         if (self.modeltype is ModelType.LINEAR) and (len(self.crf_data) >= 2):
             print("Enough data to fit linear model")
             try:

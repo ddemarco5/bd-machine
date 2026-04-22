@@ -1,11 +1,17 @@
-# BD_SIZE = 25025314816 # bytes, BD-R single layer
-BD_SIZE = 50050629632 # BD-R dual layer
+BD_SIZE = 25025314816 # bytes, BD-R single layer
+# BD_SIZE = 50050629632 # BD-R dual layer
 # BD_SIZE = 31900000000 # tablet sd card
 # BD_SIZE = 15935012864 # bd size left over for partially completed projects
 
 # THRESHHOLD = .02 # 2% size threshhold for now
 THRESHHOLD = .04 # 4% seems to be the best granularity we can get with nvenc cq mode
 THRESHHOLD_TARGET = THRESHHOLD / 2 # aim smack dab in the threshhold
+
+# Smallest CQ increment hevc_nvenc will actually act on. Although ffmpeg stores
+# -cq as 8.8 fixed-point, the NVIDIA driver only honors the top 2 bits of the
+# fractional byte, giving an effective resolution of 0.25. Confirmed empirically
+# via binary-search test (see test.py) across multiple base CQ values.
+NVENC_CQ_STEP = 0.25
 
 # https://www.sony.com/electronics/support/res/manuals/4579/f2b13b14d596d6574a73a689b5d4b0dc/45796631M.pdf
 class BDP_S3700:
