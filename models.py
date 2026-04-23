@@ -76,7 +76,7 @@ class Model:
         # OptimizeWarning about undefined covariance in that degenerate case
         # is suppressed inside _safe_curve_fit. Power is noisier so we wait
         # for >= 4 points before fitting.
-        if (self.modeltype is ModelType.LINEAR) and (len(self.crf_data) >= 2):
+        if (self.modeltype is ModelType.LINEAR) and (len(self.crf_data) >= 3):
             print("Enough data to fit linear model")
             try:
                 self.params[0], self.params[1], self.r_squared = fit_linear_function(self.crf_data, self.bitrate_data)

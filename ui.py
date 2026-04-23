@@ -297,6 +297,14 @@ class UIManager:
             self._history.append(percent_off)
             self._refresh_panel()
 
+    def set_history(self, values):
+        """Replace the History bar contents wholesale (used on project reload)."""
+        with self._lock:
+            self._history.clear()
+            # deque(maxlen=...) will trim on extend if values exceeds capacity.
+            self._history.extend(values)
+            self._refresh_panel()
+
     def refresh(self):
         with self._lock:
             self._refresh_panel()

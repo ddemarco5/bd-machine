@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import pickle
@@ -65,6 +66,10 @@ class Project:
         # The fine-tune linear model
         self.fine_tune_model = Model(ModelType.LINEAR, maxsize=4)
 
+        # Size-error history (fractional percent_off per encode pass).
+        # Persisted across pause/resume so the UI History bar survives reloads.
+        self.size_history = []
+
     # Pickle stuff
     def __reduce__(self):
         # Return a tuple of the callable and the arguments to recreate the object
@@ -87,6 +92,9 @@ class Project:
                 instance = pickle.load(f)
             # Inject the UI manager into loaded instance
             instance.ui = ui_manager
+            # Replay persisted size-error history into the UI's History bar.
+            if ui_manager is not None:
+                ui_manager.set_history(instance.size_history)
             return instance
         else:
             msg = f"{pickle_file} wasn't found, creating a new project"
@@ -187,7 +195,24 @@ class Project:
             print("problem, could not converge")
             exit(1)
 
-        return result.root
+        return self._snap_crf(result.root)
+
+    def _snap_crf(self, crf):
+        """Snap a CRF/CQ to whatever precision the configured encoder can
+        actually act on.
+
+        hevc_nvenc's CQ is 8.8 fixed-point but the driver only honours the top
+        2 bits of the fractional byte (see constants.NVENC_CQ_STEP), so any
+        finer value silently rounds. We ceil to the next quantum (higher CQ
+        -> lower bitrate -> smaller file) so rounding bias pushes us toward
+        the undersized side of the size target. Keeps every downstream
+        consumer — the encoder, last_attempted_crf, and fine_tune_model data
+        points — in agreement about what CRF actually ran.
+        """
+        if self.profile.video_codec == "hevc_nvenc":
+            q = constants.NVENC_CQ_STEP
+            return math.ceil(crf / q) * q
+        return crf
         
     def add_episode(self, ep_num, vid_src, name=None, origin_src=None, aud_src=None, sub_src=None, sub_track=0, aud_track=0):
         # TODO: make sure we don't add episodes if they already,
@@ -220,6 +245,14 @@ class Project:
         print(f"Added episode {ep_num} - {name}: {episode.vid_src}")
         print("From source: " + source_to_use.name)
         
+    def _record_size_history(self, percent_off):
+        """Append a size-error data point and mirror it to the UI's History bar.
+        Keeps the persisted list and the live display in sync from one call site.
+        """
+        self.size_history.append(percent_off)
+        if self.ui is not None:
+            self.ui.append_history(percent_off)
+
     def reset_episodes(self):
         for e in self.episodes:
             e.reset()
@@ -352,7 +385,7 @@ class Project:
             return
         print(f"Encoding video {ep.ep_num} - {ep.ep_name}")
         self.ui.update_episode(ep, len(self.episodes))
-        self.ui.update_status(f"Starting encode with CRF {crf:.2f}")
+        self.ui.update_status(f"Encoding video with CRF {crf:.2f}")
         result = encode_video(ep,
                          out_path=self.workdir,
                          crf=crf,
@@ -415,6 +448,7 @@ class Project:
                     print(f"We've previously profiled point {crf}, skipping")
                     continue
                 print(f"Profiling video with crf: {crf}")
+                self.ui.update_status(f"Profiling video with crf: {crf}")
                 # pass stepsize here to record how many crf steps we are about to profile
                 self.ui.update_episode(ep, stepsize)
                 result = encode_video(ep,
@@ -472,6 +506,7 @@ class Project:
                        "DTS" in self.profile.supported_audio_codecs and \
                        audformat_other != "DTS":
                         print(f"Fancy DTS \"{audformat_other}\" detected, extracting elementary DTS")
+                        self.ui.update_status(f"Extracting DTS for episode {e.ep_num}")
                         result = extract_elementary_dts_audio(e,
                             out_path=self.workdir,
                             profile=self.profile,
@@ -490,6 +525,7 @@ class Project:
                 print(f"{audformat} isn't in the list of supported codecs, {self.profile.supported_audio_codecs}") 
                 # In the case we fall through to here, encode the episode
                 print(f"Encoding episode {e.ep_num} audio")
+                self.ui.update_status(f"Encoding audio for episode {e.ep_num}")
                 result = encode_audio(e,
                             out_path=self.workdir,
                             profile=self.profile,
@@ -559,14 +595,14 @@ class Project:
             print(f"We're aiming for a bitrate between {target_bitrate_w_threshhold} and {target_bitrate} ({constants.THRESHHOLD * 100}% within target).\nOur fine tuning model estimates a crf of {self.current_crf}")
         elif not self.fine_tune_model.r_squared or self.last_percent_off > .1: # inverse of above
             print("We're going to use the naiive method to creep up on our target this pass")
-            increment = .10 # 10% of our error
+            increment = .5  # 50% of our error for linear model
             if self.last_percent_off > constants.THRESHHOLD or self.last_percent_off > 0:
                 # If we're oversized we need a big jump to get undersized
                 # double change to get us undersized
                 print("We're oversized")
                 # we don't want it taking forever to get to an undersized state, but
                 # we also don't want to overshoot, so we limit the floor of the undersizing step
-                percent_to_change = abs(self.last_percent_off) * (1.5*increment)
+                percent_to_change = abs(self.last_percent_off) * increment
                 percent_to_change = max(percent_to_change, .005) # .5% floor for now
                 self.current_crf = self.last_attempted_crf * (1+percent_to_change)
                 print(f"We were over by {self.last_percent_off*100}%, adjusting by {percent_to_change*100}%")
@@ -594,29 +630,28 @@ class Project:
             print(f"Resuming previously stopped processing with crf of {self.current_crf}")
         
             
-        # hevc_nvenc can only actually act on CQ values at constants.NVENC_CQ_STEP
-        # granularity (driver honors only the top 2 bits of the 8.8 fixed-point
-        # fractional byte). If our newly-computed CQ rounds to the same quantum
-        # as last time, encoding again would produce an identical file — detect
-        # and handle that stall here.
+        # Snap the newly-computed CRF to the encoder's real precision before
+        # doing anything else with it — keeps the value we hand to the
+        # encoder, store as last_attempted_crf, and feed to fine_tune_model
+        # identical to what actually ran.
+        self.current_crf = self._snap_crf(self.current_crf)
         if self.profile.video_codec == "hevc_nvenc" and self.last_attempted_crf is not None:
-            q = constants.NVENC_CQ_STEP
-            prev_q = round(self.last_attempted_crf / q) * q
-            next_q = round(self.current_crf / q) * q
-            if next_q == prev_q:
+            prev_q = self._snap_crf(self.last_attempted_crf)
+            print(f"Checking for CQ stall between {prev_q} and {self.current_crf}")
+            if self.current_crf == prev_q:
                 if self.last_percent_off is not None and self.last_percent_off <= 0:
                     # Undersized and can't tighten further without re-encoding the same thing.
                     print(f"Stalled at CQ {prev_q} (undersized by {self.last_percent_off*100:.2f}%). Accepting as final.")
                     return True
                 # Oversized stall: force one quantum step up (higher CQ -> smaller file).
-                self.current_crf = prev_q + q
+                self.current_crf = prev_q + constants.NVENC_CQ_STEP
                 print(f"Stalled at CQ {prev_q} while oversized; bumping to {self.current_crf}")
 
         print(f"Encoding the project with a crf of {self.current_crf}, last attempted was {self.last_attempted_crf}")
         self.encode_episodes(self.eps_to_process, self.current_crf)
         self.last_attempted_crf = self.current_crf
         self.last_percent_off = self.check_size_threshhold()
-        self.ui.append_history(self.last_percent_off)
+        self._record_size_history(self.last_percent_off)
         # check_size_threshhold sets self.total_project_size, we can use it to calculate the data for our fine-tuner
         project_bitrate = (self.total_project_size * 8) / self.total_duration # we want this in bits/s
         self.fine_tune_model.add_data_point(self.last_attempted_crf, project_bitrate)
@@ -636,7 +671,7 @@ class Project:
             e = episode_list[0] # get a ref to the first element
 
             # Update overall progress
-            self.ui.update_overall_progress(current_idx, total_eps)
+            self.ui.update_overall_progress(current_idx-1, total_eps)
             self.ui.update_status(f"CRF {crf:.2f} | Processing {e.ep_name}")
 
             # We haven't encoded

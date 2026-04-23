@@ -31,7 +31,7 @@ def setup_and_run_project(ui):
 
 
     # Process project
-    proj.process_project()
+    proj.process_project(crf_hint=17)
 
 
 if __name__ == "__main__":
