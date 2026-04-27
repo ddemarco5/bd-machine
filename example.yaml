@@ -1,0 +1,21 @@
+project:
+  # project name is taken from this file's stem
+  work_dir: workspace
+  output_dir: encoded
+  fonts_dir: fonts
+  profile: UBP_X700
+  hdr: true
+  hardsub: true
+
+episodes:
+  - ep_num: 1
+    vid_src: "/video/path.mkv"
+    aud_track: 0
+    sub_track: 2
+    name: "Episode 1"
+
+  - ep_num: 2
+    vid_src: "/video/path.mkv"
+    aud_track: 0
+    sub_track: 2
+    name: "Episode 2"

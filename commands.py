@@ -254,15 +254,16 @@ def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub=False) -> None:
         "--output", str(outfile),
         "--video-tracks", vid_track,
         "--no-track-tags", "--no-global-tags",
+        "--track-name", "0:",
         "--no-audio", "--no-subtitles",  "--no-attachments",
         "--language", "0:und",
         "(", episode.vid_enc.absolute(), ")", # video track
         "--audio-tracks", aud_track,
         "--no-track-tags", "--no-global-tags",
+        "--track-name", "1:",
         "--no-video", "--no-subtitles", "--no-chapters", "--no-attachments",
-        # "--no-video", "--no-subtitles", "--no-chapters",
         "--language", f"{aud_track}:eng", # audio track
-        "(", episode.aud_enc.absolute(), ")",    
+        "(", episode.aud_enc.absolute(), ")",
     ]
     
     track_order = ["--track-order", f"0:0,1:{aud_track}"]
@@ -272,6 +273,7 @@ def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub=False) -> None:
         command = command + ["--no-video", "--no-audio", "--no-chapters", "--no-track-tags", "--no-global-tags","--no-attachments"]
         command = command + ["--subtitle-tracks", sub_track]
         command = command + ["--language", "0:eng"]
+        command = command + ["--track-name", "2:"]
         command = command + ["(", episode.sub_enc.absolute(), ")"]
         track_order[1] = track_order[1] + f",2:{sub_track}"
     

@@ -46,6 +46,7 @@ class Project:
         
         # self.profile = constants.BDP_S3700
         self.profile = constants.UBP_X700
+        self.TARGET_SIZE = constants.BD_SIZE
         
         # Project options
         self.hardsub = False
@@ -173,7 +174,7 @@ class Project:
             for i in range(0, len(runtime_list)):
                 bitrate = self.sources[i].model.bitrate_given_crf(crf)
                 total_data_used += (bitrate/8) * (runtime_list[i]/1000)
-            return (total_data_used + self.total_audio_size) - constants.BD_SIZE
+            return (total_data_used + self.total_audio_size) - self.TARGET_SIZE
         
         botrange, toprange = 1,40
         result = root_scalar(weighted_crf, method="bisect", bracket=[botrange, toprange])
@@ -187,7 +188,7 @@ class Project:
             # for s in self.sources:
                 bitrate = self.sources[i].model.bitrate_given_crf(result.root)
                 data_usage = (bitrate/8) * (runtime_list[i]/1000)
-                data_usage_perc = (data_usage / constants.BD_SIZE) * 100
+                data_usage_perc = (data_usage / self.TARGET_SIZE) * 100
                 print(f"{self.sources[i].name}: {bitrate/1000}kbps")
                 print(f"{data_usage/1000:.3f}kB, or {data_usage_perc:.3f}% of the total disc capacity")
                 print("(should be less than 100 due to audio/sub stream sizes)")
@@ -320,7 +321,7 @@ class Project:
         print(f"or {self.total_duration/1000 / 60 / 60:.3f} hours")
         
         # Print some basic information about the project we're about to begin
-        proj_kbps = (constants.BD_SIZE * 8) / (self.total_duration/1000) / 1000
+        proj_kbps = (self.TARGET_SIZE * 8) / (self.total_duration/1000) / 1000
         
         print(f"Calculated a required file bitrate of {proj_kbps:.3f}Kb/s, that's audio and video")
         if proj_kbps <= 1000:
@@ -421,9 +422,9 @@ class Project:
         stepsize = 4
         # High crf to low crf to save time in case we're monitoring live
         crfs = numpy.linspace(range_hi, range_lo, stepsize)
-        #ep = self.episodes[ep_num-1]
         
-        # self.current_crf = range_lo
+        # fix up our crfs with our rounding function
+        crfs[:] = [self._snap_crf(c) for c in crfs]
         
         workpath = Path("./profile")
         if not workpath.exists():
@@ -495,12 +496,17 @@ class Project:
                 print("Encoded audio file found, skipping encode...")
                 continue
             # Check our audio format and take the appropriate action
-            audinfo = MediaInfo.parse(e.aud_src)
+            if e.audio_info is not None:
+                audinfo = e.audio_info
+            else:
+                assert False, "We should really never hit here"
+                print(e.audio_info)
+                audinfo = MediaInfo.parse(e.aud_src)
             audformat = audinfo.audio_tracks[e.aud_track].format
             audformat_other = audinfo.audio_tracks[e.aud_track].other_format[0]
             if audformat in self.profile.supported_audio_codecs:
                 e.audio_info = audinfo
-                e.aud_enc = e.aud_src
+                # e.aud_enc = e.aud_src
                 if not self.encode_aud: # if we aren't forcing an encode
                     if audformat == "DTS" and \
                        "DTS" in self.profile.supported_audio_codecs and \
@@ -543,18 +549,23 @@ class Project:
                 
         
         # Loop over again to tally the audio size
+        print("Re-calculating total audio size")
         self.total_audio_size = 0
         for e in self.episodes:
             # get the audio bitrate and add it to cumulative
-            # we may have changed the aud_enc file, so just re-parse even though we might not need to
-            e.audio_info = MediaInfo.parse(e.aud_enc)
+            # re-scan if we've modified the audio somehow
+            if e.aud_enc is not None:
+                print(f"Re-scanning episode {e.ep_num} audio")
+                e.audio_info = MediaInfo.parse(e.aud_enc)
+            else:
+                e.aud_enc = e.aud_src
             # print(e.aud_enc)
             # print(audio_info.audio_tracks[0].to_data())
             # exit()
             self.total_audio_size += e.audio_info.audio_tracks[e.aud_track].stream_size
         
         print(f"Processed all audio with a total stream size of {self.total_audio_size} bytes")
-        print(f"or {(self.total_audio_size / constants.BD_SIZE)*100:.3f}% of the disc")
+        print(f"or {(self.total_audio_size / self.TARGET_SIZE)*100:.3f}% of the disc")
     
     def check_size_threshhold(self):
         # Calculate the total size
@@ -565,7 +576,7 @@ class Project:
             self.total_project_size += MediaInfo.parse(e.final).tracks[0].file_size
         
         print(f"Total project size is {self.total_project_size} bytes")
-        percent_off = (self.total_project_size - constants.BD_SIZE) / constants.BD_SIZE
+        percent_off = (self.total_project_size - self.TARGET_SIZE) / self.TARGET_SIZE
         
         print(f"We are off by {percent_off*100}% and our goal is {constants.THRESHHOLD*100*-1}")
         return percent_off   
@@ -588,7 +599,7 @@ class Project:
             # the video stream, this is okay as we're using a simple linear function to fine-tune
             # that is capable of accounting for it
             print("Using our fine-tuning function to approach the final threshhold")
-            target_bitrate = (constants.BD_SIZE * 8) / self.total_duration # we want this in bits/s
+            target_bitrate = (self.TARGET_SIZE * 8) / self.total_duration # we want this in bits/s
             # Subtract our aiming threshhold because we want to come in undersized
             target_bitrate_w_threshhold = target_bitrate * (1 - constants.THRESHHOLD_TARGET)
             self.current_crf = self.fine_tune_model.crf_given_bitrate(target_bitrate_w_threshhold)

@@ -1,7 +1,5 @@
 BD_SIZE = 25025314816 # bytes, BD-R single layer
-# BD_SIZE = 50050629632 # BD-R dual layer
-# BD_SIZE = 31900000000 # tablet sd card
-# BD_SIZE = 15935012864 # bd size left over for partially completed projects
+BD_DL_SIZE = 50050629632 # BD-R dual layer
 
 # THRESHHOLD = .02 # 2% size threshhold for now
 THRESHHOLD = .04 # 4% seems to be the best granularity we can get with nvenc cq mode
