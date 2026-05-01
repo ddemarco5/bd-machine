@@ -54,7 +54,7 @@ def extract_elementary_dts_audio(episode, out_path, profile, ui_manager: UIManag
         return None
     return out_path / filename
 
-def encode_video(episode, out_path, profile, crf, hardsub, fontsdir, ui_manager: UIManager, start_time=None, stop_time=None, cropstring=None, scalestring=None, videotune=None, keephdr=False) -> None:
+def encode_video(episode, out_path, profile, crf, hardsub_all, fontsdir, ui_manager: UIManager, start_time=None, stop_time=None, cropstring=None, scalestring=None, videotune=None, keephdr=False) -> None:
   
     filename = "vid" + str(episode.ep_num)
     if keephdr:
@@ -140,9 +140,16 @@ def encode_video(episode, out_path, profile, crf, hardsub, fontsdir, ui_manager:
     if scalestring:
         print(f"Scalestring detected: {scalestring}")
         vid_filter_string += f"scale={scalestring},"
-        
-    if hardsub and episode.sub_enc:
-        subpath = episode.sub_enc.absolute()
+
+    if ((hardsub_all and episode.sub_enc) or 
+        episode.hardsub_enc):
+        if hardsub_all:
+            print("Adding global hardsub")
+            sub_source = episode.sub_enc
+        else:
+            print("Adding local hardsub")
+            sub_source = episode.hardsub_enc
+        subpath = sub_source.absolute()
         fontpath = fontsdir.absolute()
         if os.name == "nt":
             print("Running in windows, fixing paths for the ffmpeg hardsub filter")
@@ -151,18 +158,14 @@ def encode_video(episode, out_path, profile, crf, hardsub, fontsdir, ui_manager:
             # https://superuser.com/questions/1247197/ffmpeg-absolute-path-error
             # to get it to work with subprocess I need to convert it to a posix style path and strip off C:
             # ALSO, special characters like [ in the filename will break it too. Pain in the ass
-            subpath = episode.sub_enc.absolute().as_posix()[2:]
+            subpath = sub_source.absolute().as_posix()[2:]
             fontpath = fontsdir.absolute().as_posix()[2:]
-        #vid_filter_string += "subtitles=filename=" + fixpath_sub + ":si=" + str(episode.sub_track)
-        # vid_filter_string += "subtitles=filename=" + str(subpath) + ":fontsdir=" + str(fontpath)
         vid_filter_string += f"subtitles=filename={str(subpath)}:fontsdir={str(fontpath)},"
-        # if fontsdir:
-        #     fixpath_font = fontsdir.absolute().as_posix()[2:]
-        #     vid_filter_string += ":fontsdir=" + fixpath_font
-        
+
     if episode.hdr and not keephdr:
         print("HDR detected, using libplacebo to convert to SDR")
         vid_filter_string += f"hwupload,libplacebo=tonemapping=auto:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=limited:deband=true:gamut_mode=desaturate:format={profile.pixel_format},hwdownload,format={profile.pixel_format},"
+
     elif episode.hdr and keephdr:
         print("HDR source detected and our target video will also be hdr")
 
@@ -232,7 +235,7 @@ def mkv_extract(infile, content, output_path, track_ids, track_names, ui_manager
         print(f"non-zero retcode for extract: {result}")
         exit(result)
 
-def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub=False) -> None:
+def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub_global=False) -> None:
     # We want 2 digts for our episode number string unless we need more
     if episode.ep_num <= 99:
         ep_num_str = "{:02d}".format(int(episode.ep_num))
@@ -260,20 +263,21 @@ def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub=False) -> None:
         "(", episode.vid_enc.absolute(), ")", # video track
         "--audio-tracks", aud_track,
         "--no-track-tags", "--no-global-tags",
-        "--track-name", "1:",
+        "--track-name", f"{aud_track}:",
         "--no-video", "--no-subtitles", "--no-chapters", "--no-attachments",
         "--language", f"{aud_track}:eng", # audio track
         "(", episode.aud_enc.absolute(), ")",
     ]
     
     track_order = ["--track-order", f"0:0,1:{aud_track}"]
-    # If we aren't hardsubbing the episode, we need to include the sub track
-    if not (episode.hardsub or hardsub):
+    # If we aren't hardsubbing the episode (either project-wide via
+    # hardsub_global or per-episode via hardsub_enc), include the sub track.
+    if not (hardsub_global and episode.sub_enc) or episode.hardsub_enc:
         sub_track = str(episode.get_sub_tracknum_absolute())
         command = command + ["--no-video", "--no-audio", "--no-chapters", "--no-track-tags", "--no-global-tags","--no-attachments"]
         command = command + ["--subtitle-tracks", sub_track]
         command = command + ["--language", "0:eng"]
-        command = command + ["--track-name", "2:"]
+        command = command + ["--track-name", f"{sub_track}:"]
         command = command + ["(", episode.sub_enc.absolute(), ")"]
         track_order[1] = track_order[1] + f",2:{sub_track}"
     

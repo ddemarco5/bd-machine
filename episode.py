@@ -4,7 +4,7 @@ from source import Source
 
 class Episode:
     
-    def __init__(self, ep_num, origin_src:Source, vid_src, name=None, aud_src=None, sub_src=-1, sub_track=0, aud_track=0):
+    def __init__(self, ep_num, origin_src:Source, vid_src, name=None, aud_src=None, hardsub_src = None, hardsub_track = None, sub_src=-1, sub_track=0, aud_track=0):
         
         # General bookkeeping info
         self.ep_num = ep_num
@@ -17,8 +17,12 @@ class Episode:
         # This will be a string in the form of numerator/denominator to pass to ffmpeg
         self.framerate = None
         
-        # This can be set per-episode or in a project-wide variable
-        self.hardsub = False
+        # This can be set per-episode or in a project-wide variable.
+        # The actual hardsub_src value is assigned further down alongside the
+        # other path-typed source attributes (aud_src/sub_src), so we only
+        # initialize the companion media-info field here.
+        self.hardsub_track = hardsub_track
+        self.hardsub_info = None
         
         # Origin source of the video, as in where it was pulled from
         self.source = origin_src
@@ -38,13 +42,18 @@ class Episode:
         self.scanned = False
         self.vid_src = Path(vid_src)
         self.aud_src = None
+        self.hardsub_src = None
         self.sub_src = None
+        # sub_src=-1 is a sentinel meaning "default to vid_src". Resolve it
+        # first so the truthy check below doesn't try Path(-1).
+        if sub_src == -1:
+            sub_src = self.vid_src
         if aud_src:
             self.aud_src = Path(aud_src)
         if sub_src:
             self.sub_src = Path(sub_src)
-        elif sub_src == -1:
-            self.sub_src = self.vid_src
+        if hardsub_src:
+            self.hardsub_src = Path(hardsub_src)
             
         self.duration_src = None
 
@@ -53,6 +62,9 @@ class Episode:
         self.vid_enc = None
         self.aud_enc = None
         self.sub_enc = None
+        # Only populated when this episode is locally hardsubbed
+        # (i.e. hardsub_src is set but the project is not in hardsub_all mode).
+        self.hardsub_enc = None
         self.streamsize_enc = None
         
         # Have we finished processing

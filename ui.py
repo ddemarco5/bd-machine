@@ -135,19 +135,42 @@ class UIManager:
             self._draw_panel()
             self._park_cursor()
 
+    @staticmethod
+    def _visual_rows(line, w):
+        """How many rows `line` occupies after terminal autowrap at width `w`."""
+        if w <= 0 or not line:
+            return 1
+        return (len(line) + w - 1) // w
+
     def _replay_scrollback(self):
-        """Paint the last N lines of scrollback into the scroll region."""
+        """Paint the last N lines of scrollback into the scroll region.
+
+        Lines are written whole and the terminal's autowrap is allowed to
+        flow them across multiple rows, so copy/paste preserves them as
+        single lines.
+        """
         w = self.term.width
         region_h = self._scroll_bot_row() + 1  # rows 0.._scroll_bot_row inclusive
         if region_h <= 0:
             return
-        lines = list(self._scrollback)[-region_h:]
+        # Walk scrollback from newest to oldest, accumulating whole lines
+        # whose combined visual rows fit in the region.
+        selected = []
+        used = 0
+        for line in reversed(self._scrollback):
+            n = self._visual_rows(line, w)
+            if used + n > region_h:
+                break
+            selected.append((line, n))
+            used += n
+        selected.reverse()
         # Place the tail flush to the bottom of the region.
-        start_row = region_h - len(lines)
+        row = region_h - used
         out = []
-        for i, line in enumerate(lines):
-            out.append(self.term.move_xy(0, start_row + i)
-                       + self.term.clear_eol + self._style_log(line[:w]))
+        for line, n in selected:
+            out.append(self.term.move_xy(0, row)
+                       + self.term.clear_eol + self._style_log(line))
+            row += n
         if out:
             self._write("".join(out))
 
@@ -251,12 +274,15 @@ class UIManager:
             # region scrolls), then paint the new line onto the now-blank
             # bottom row. Doing it in this order avoids leaving a trailing
             # blank row between the newest log line and the divider.
+            # The line is written in full; the terminal's autowrap (DECAWM)
+            # combined with the DECSTBM scroll region handles long lines
+            # natively, so copy/paste keeps them as a single line.
             bot = self._scroll_bot_row()
             self._write(self.term.move_xy(0, bot)
                         + "\n"
                         + self.term.move_xy(0, bot)
                         + self.term.clear_eol
-                        + self._style_log(msg[:self.term.width]))
+                        + self._style_log(msg))
 
     def update_status(self, text: str):
         """Set the free-form left-side status text."""

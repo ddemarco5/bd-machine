@@ -9,6 +9,7 @@ project:
 
 episodes:
   - ep_num: 1
+    # single quote ' must be used if using windows' \ directory delimiter
     vid_src: "/video/path.mkv"
     aud_track: 0
     sub_track: 2

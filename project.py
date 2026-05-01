@@ -49,7 +49,7 @@ class Project:
         self.TARGET_SIZE = constants.BD_SIZE
         
         # Project options
-        self.hardsub = False
+        self.hardsub_all = False
         self.encode_aud = False
         self.hdr = False
         self.fonts_dir = False
@@ -215,36 +215,39 @@ class Project:
             return math.ceil(crf / q) * q
         return crf
         
-    def add_episode(self, ep_num, vid_src, name=None, origin_src=None, aud_src=None, sub_src=None, sub_track=0, aud_track=0):
+    def add_episode(self, episode: Episode):
+        """Register an already-built Episode with this project.
+
+        Callers (e.g. project_loader) construct the Episode directly so we
+        don't have to mirror Episode.__init__'s signature here. This method
+        only handles project-level concerns: dedup, default-source fallback,
+        and applying project-wide encode-passthrough flags.
+        """
         # TODO: make sure we don't add episodes if they already,
         # right now just do a simple number check
         for e in self.episodes:
-            if e.ep_num == ep_num:
+            if e.ep_num == episode.ep_num:
                 print("An episode of this number has already been added, skipping")
                 return
-            
-        # If we don't specify a source for the episode, default to the first
-        source_to_use = origin_src
-        if not source_to_use:
-            # If we don't have a source, create it
+
+        # If the caller didn't pin an origin source, fall back to the first
+        # project source (creating a default one if the project has none).
+        if episode.source is None:
             if len(self.sources) == 0:
                 self.add_source("Default")
-            source_to_use = self.sources[0]
-        
-        # TODO: this is basically a straight arg passthrough, probably a better way of doing this
-        episode = Episode(ep_num, source_to_use, vid_src, name, aud_src, sub_src, sub_track, aud_track)
-        
+            episode.source = self.sources[0]
+
         # If we don't have to encode the audio we can save the passed src as the final data to be muxxed
         if not self.encode_aud:
             episode.aud_enc = episode.aud_src
-            
+
         # Same with subtitles
-        if not self.hardsub:
+        if not self.hardsub_all:
             episode.sub_enc = episode.sub_src
-            
+
         self.episodes.append(episode)
-        print(f"Added episode {ep_num} - {name}: {episode.vid_src}")
-        print("From source: " + source_to_use.name)
+        print(f"Added episode {episode.ep_num} - {episode.ep_name}: {episode.vid_src}")
+        print("From source: " + episode.source.name)
         
     def _record_size_history(self, percent_off):
         """Append a size-error data point and mirror it to the UI's History bar.
@@ -279,7 +282,6 @@ class Project:
                 print("Audio source is the same as video")
                 e.aud_src = e.vid_src
                 e.audio_info = e.media_info
-            #if e.sub_src and not e.sub_info:
             if (e.sub_src 
                 and not e.sub_info
                 and (e.sub_src != e.vid_src)):
@@ -288,7 +290,16 @@ class Project:
             else:
                 print("Sub source is the same as video")
                 e.sub_src = e.vid_src
-                e.sub_info = e.media_info
+                e.sub_info = e.media_info         
+            if (e.hardsub_src 
+                and not e.hardsub_info
+                and (e.hardsub_src != e.vid_src)):
+                    print(f"Parsing separate hardsub source {e.hardsub_src}")
+                    e.hardsub_info = MediaInfo.parse(e.hardsub_src)
+            elif e.hardsub_track and not e.hardsub_src:
+                print("Hardsub source is the same as video")
+                e.hardsub_src = e.vid_src
+                e.hardsub_info = e.media_info
                 
             if e.media_info:
                 e.duration_src = float(e.media_info.video_tracks[0].duration)
@@ -331,7 +342,7 @@ class Project:
         elif proj_kbps >= 20000:
             print("We have so much overhead for bitrate here, it is likely more efficient to do a 2-pass encode instead.")
         input("press enter to confirm...")
-        
+
     def extract_subs_and_fonts(self):
         for e in self.episodes:
             if not e.sub_info:
@@ -341,42 +352,63 @@ class Project:
                 print(f"Episode {e.ep_num}'s subs and fonts have already been extracted")
                 continue
             # Extract the attachments (fonts)
-            if (e.sub_src.suffix == ".mkv") and (self.hardsub) and (e.sub_info.tracks[0].attachments):
+            if ((e.sub_src.suffix == ".mkv")
+                    and (self.hardsub_all or e.hardsub_src)
+                    and (e.sub_info.tracks[0].attachments)):
+
+                if self.hardsub_all:
+                    attachments = e.sub_info.tracks[0].attachments
+                elif e.hardsub_info is not None:
+                    attachments = e.hardsub_info.tracks[0].attachments
+                
                 subnames = []
                 delim = " / "
-                if delim not in e.sub_info.tracks[0].attachments:
-                    subnames = [e.sub_info.tracks[0].attachments]
+                if delim not in attachments:
+                    subnames = [attachments]
                 else:
-                    subnames = e.sub_info.tracks[0].attachments.split(delim)
+                    subnames = attachments.split(delim)
                 if not subnames:
                     print(f"{e.ep_num} does not have subtitle attachments")
                 else:
                     mkv_extract(e.sub_src, "attachments", self.fonts_dir, list(range(1,len(subnames)+1)), subnames,
                                 ui_manager=self.ui)
+            # Extract a raw subtitle file for use with the ffmpeg hardsub filter
             # TODO: Intelligent extraction/conversion if subtitles aren't the correct type (srt)
-            if (e.sub_src.suffix == ".mkv") and self.hardsub:    
-                # Calculate the total number of media tracks before subtitles bc mkvextract indexes them all together
-                # num_tracks = len(e.sub_info.video_tracks) + len(e.sub_info.audio_tracks)
-                #print(f"{num_tracks} non sub tracks")
-                # sub_track_to_extract = num_tracks + e.sub_track
-                sub_track_to_extract = e.get_sub_tracknum_absolute()
-                format_str = e.sub_info.text_tracks[e.sub_track].format.lower()
-                filename = "sub" + str(e.ep_num) + "." + format_str
-                mkv_extract(e.sub_src,
-                            "tracks",
-                            self.workdir,
-                            [sub_track_to_extract],
-                            [filename],
-                            ui_manager=self.ui)
-                
-                # now that the subs/fonts have been extracted, we can mark them as the final source to be muxxed
-                e.sub_enc = (self.workdir / filename)
-                e.sub_track = 0 # We've just written a file with only 1 "track", our subtitles
-            else:
-                # print("subtitles aren't in an mkv file, setting the path directly")
+            if e.sub_src.suffix == ".mkv" and (self.hardsub_all or e.hardsub_src):
+                def _extract_sub(src, info, track, name):
+                    # Calculate the total number of media tracks before subtitles bc mkvextract indexes them all together
+                    sub_track_to_extract = len(info.video_tracks) + len(info.audio_tracks) + track
+                    format_str = info.text_tracks[e.track].format.lower()
+                    filename = name + str(e.ep_num) + "." + format_str
+                    mkv_extract(src,
+                                "tracks",
+                                self.workdir,
+                                [sub_track_to_extract],
+                                [filename],
+                                ui_manager=self.ui)
+                    # now that the subs/fonts have been extracted, we can mark them as the final source to be muxxed
+                    sub_target = (self.workdir / filename)
+                    return sub_target
+                # Determine which info to use based on hardsub settings
+                if self.hardsub_all: # if we're only hardsubbing
+                    e.sub_enc = _extract_sub(e.sub_src, e.sub_info, e.sub_track, "sub")
+                    e.sub_track = 0
+                elif e.hardsub_src: # if we have a hardsub source
+                    e.hardsub_src = _extract_sub(e.hardsub_src, e.hardsub_info, e.hardsub_track, "hsub")
+                    e.hardsub_track = 0
+                else:
+                    assert False, "We don't have all the subtitle info we expect"
+            
+            if e.hardsub_src and not self.hardsub_all:
+                # Per-episode hardsub: keep sub_enc pointing at the original
+                # sub source (so it can still be soft-muxed if desired) and
+                # stash the hardsub-only file under hardsub_enc.
+                e.hardsub_enc = e.hardsub_src
+                print(f"Final hardsub source configured")
+            if not e.sub_enc:
                 e.sub_enc = e.sub_src
-                print("No subs or fonts to extract")
-                # exit(1)
+                print(f"Final sub source configured")
+
         self.save()
             
         
@@ -391,7 +423,7 @@ class Project:
                          out_path=self.workdir,
                          crf=crf,
                          profile=self.profile,
-                         hardsub=(self.hardsub or ep.hardsub),
+                         hardsub_all=self.hardsub_all,
                          fontsdir=self.fonts_dir.absolute(),
                          cropstring=self.cropstring,
                          scalestring=self.scalestring,
@@ -408,7 +440,7 @@ class Project:
         self.save()
         
     def finalize_episode(self, ep: Episode):
-            ret = mux_mkv(ep, self.outputdir, ui_manager=self.ui, hardsub=self.hardsub)
+            ret = mux_mkv(ep, self.outputdir, ui_manager=self.ui, hardsub_global=self.hardsub_all)
             if ret:
                 print(f"Marked episode {ep.ep_name} as finalized")
                 ep.final = ret
@@ -456,7 +488,7 @@ class Project:
                             out_path=workpath,
                             crf=crf,
                             profile=self.profile,
-                            hardsub=(self.hardsub or ep.hardsub),
+                            hardsub_all=(self.hardsub_all or ep.hardsub_info),
                             fontsdir=self.fonts_dir.absolute(),
                             #start_time=300, # start after openings
                             stop_time="01:00:00",
@@ -606,7 +638,7 @@ class Project:
             print(f"We're aiming for a bitrate between {target_bitrate_w_threshhold} and {target_bitrate} ({constants.THRESHHOLD * 100}% within target).\nOur fine tuning model estimates a crf of {self.current_crf}")
         elif not self.fine_tune_model.r_squared or self.last_percent_off > .1: # inverse of above
             print("We're going to use the naiive method to creep up on our target this pass")
-            increment = .5  # 50% of our error for linear model
+            increment = .25  # 25% of our error for linear model
             if self.last_percent_off > constants.THRESHHOLD or self.last_percent_off > 0:
                 # If we're oversized we need a big jump to get undersized
                 # double change to get us undersized

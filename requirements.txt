@@ -4,3 +4,4 @@ pymediainfo
 scipy
 blessed
 pyyaml
+srt
