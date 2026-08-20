@@ -286,6 +286,10 @@ def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub_global=False) -> N
         "mkvmerge",
         "--ui-language", lang,
         "--output", str(outfile),
+        # Segment Info Title is not a tag. Without an explicit --title,
+        # mkvmerge copies it from the first input that has one (encoded
+        # MKV, ASS Script Info, MP4 ©nam, etc.).
+        "--title", "",
         "--video-tracks", vid_track,
         "--no-track-tags", "--no-global-tags",
         "--track-name", "0:",
