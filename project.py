@@ -397,7 +397,14 @@ class Project:
                 if e.sub_src.suffix.lower() == ".srt":
                     e.sub_enc = e.sub_src
                 else:
-                    e.sub_enc = _extract_sub(e.sub_src, e.sub_info, e.sub_track, "sub", True)
+                    sub_track_info = e.sub_info.text_tracks[e.sub_track]
+                    sub_fmt = (sub_track_info.format or "").lower()
+                    sub_codec_id = (sub_track_info.codec_id or "").lower()
+                    convert_to_srt = not (
+                        sub_fmt in ("utf-8", "srt", "subrip")
+                        or sub_codec_id in ("s_text/utf8", "srt")
+                    )
+                    e.sub_enc = _extract_sub(e.sub_src, e.sub_info, e.sub_track, "sub", convert_to_srt)
                 e.sub_track = 0
                 e.sub_info = MediaInfo.parse(e.sub_enc)
                 print(f"Final sub source configured")
