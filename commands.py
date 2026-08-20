@@ -235,6 +235,37 @@ def mkv_extract(infile, content, output_path, track_ids, track_names, ui_manager
         print(f"non-zero retcode for extract: {result}")
         exit(result)
 
+def extract_sub_track(src, track, out_path, filename, ui_manager: UIManager, convert_to_srt=True, sub_format=None):
+    if src.suffix.lower() == ".srt":
+        return src
+    fmt = (sub_format or "").lower()
+    if fmt in ("pgs", "vobsub", "hdmv"):
+        print(f"Cannot convert bitmap subtitles ({fmt}) to SRT")
+        exit(1)
+    # Timed Text / tx3g isn't a usable sidecar, always convert
+    if convert_to_srt or fmt in ("timed text", "tx3g"):
+        filename = filename + ".srt"
+        codec = "srt"
+    else:
+        if fmt in ("utf-8", "srt"):
+            fmt = "srt"
+        filename = filename + "." + (fmt if fmt else "sub")
+        codec = "copy"
+    outfile = out_path / filename
+    command = ["ffmpeg", "-y",
+               "-v", "quiet",
+               "-stats",
+               "-i", src.absolute(),
+               "-map", "0:s:" + str(track),
+               "-c:s", codec,
+               outfile.absolute()]
+    result = _run(command, ui_manager)
+    if result != 0:
+        print(f"non-zero retcode for subtitle extract: {result}")
+        print(f"Cannot convert subtitles of type {fmt or 'unknown'} to SRT")
+        exit(result)
+    return outfile
+
 def mux_mkv(episode, out_path, ui_manager: UIManager, hardsub_global=False) -> None:
     # We want 2 digts for our episode number string unless we need more
     if episode.ep_num <= 99:

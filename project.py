@@ -372,42 +372,40 @@ class Project:
                 else:
                     mkv_extract(e.sub_src, "attachments", self.fonts_dir, list(range(1,len(subnames)+1)), subnames,
                                 ui_manager=self.ui)
-            # Extract a raw subtitle file for use with the ffmpeg hardsub filter
-            # TODO: Intelligent extraction/conversion if subtitles aren't the correct type (srt)
-            if e.sub_src.suffix == ".mkv" and (self.hardsub_all or e.hardsub_src):
-                def _extract_sub(src, info, track, name):
-                    # Calculate the total number of media tracks before subtitles bc mkvextract indexes them all together
-                    sub_track_to_extract = len(info.video_tracks) + len(info.audio_tracks) + track
-                    format_str = info.text_tracks[e.track].format.lower()
-                    filename = name + str(e.ep_num) + "." + format_str
-                    mkv_extract(src,
-                                "tracks",
-                                self.workdir,
-                                [sub_track_to_extract],
-                                [filename],
-                                ui_manager=self.ui)
-                    # now that the subs/fonts have been extracted, we can mark them as the final source to be muxxed
-                    sub_target = (self.workdir / filename)
-                    return sub_target
-                # Determine which info to use based on hardsub settings
-                if self.hardsub_all: # if we're only hardsubbing
-                    e.sub_enc = _extract_sub(e.sub_src, e.sub_info, e.sub_track, "sub")
-                    e.sub_track = 0
-                elif e.hardsub_src: # if we have a hardsub source
-                    e.hardsub_src = _extract_sub(e.hardsub_src, e.hardsub_info, e.hardsub_track, "hsub")
-                    e.hardsub_track = 0
+            def _extract_sub(src, info, track, name, convert_to_srt):
+                t = info.text_tracks[track]
+                fmt = (t.format or t.codec_id or "").lower()
+                return extract_sub_track(src, track, self.workdir, name + str(e.ep_num),
+                                         self.ui, convert_to_srt=convert_to_srt, sub_format=fmt)
+
+            # Extract a sidecar for the ffmpeg hardsub filter (keep ASS/etc, convert Timed Text)
+            if self.hardsub_all:
+                if e.sub_src.suffix.lower() != ".srt":
+                    e.sub_enc = _extract_sub(e.sub_src, e.sub_info, e.sub_track, "sub", False)
                 else:
-                    assert False, "We don't have all the subtitle info we expect"
-            
-            if e.hardsub_src and not self.hardsub_all:
-                # Per-episode hardsub: keep sub_enc pointing at the original
-                # sub source (so it can still be soft-muxed if desired) and
-                # stash the hardsub-only file under hardsub_enc.
+                    e.sub_enc = e.sub_src
+                e.sub_track = 0
+            elif e.hardsub_src:
+                if e.hardsub_src.suffix.lower() != ".srt":
+                    e.hardsub_src = _extract_sub(e.hardsub_src, e.hardsub_info, e.hardsub_track, "hsub", False)
+                    e.hardsub_track = 0
                 e.hardsub_enc = e.hardsub_src
                 print(f"Final hardsub source configured")
-            if not e.sub_enc:
+
+            # Mux-bound track: always an elementary SRT (unless we're only burning)
+            if not self.hardsub_all:
+                if e.sub_src.suffix.lower() == ".srt":
+                    e.sub_enc = e.sub_src
+                else:
+                    e.sub_enc = _extract_sub(e.sub_src, e.sub_info, e.sub_track, "sub", True)
+                e.sub_track = 0
+                e.sub_info = MediaInfo.parse(e.sub_enc)
+                print(f"Final sub source configured")
+            elif not e.sub_enc:
                 e.sub_enc = e.sub_src
                 print(f"Final sub source configured")
+
+            e.subs_extracted = True
 
         self.save()
             
