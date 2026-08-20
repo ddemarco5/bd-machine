@@ -392,7 +392,8 @@ class Project:
                 e.hardsub_enc = e.hardsub_src
                 print(f"Final hardsub source configured")
 
-            # Mux-bound track: always an elementary SRT (unless we're only burning)
+            # Mux-bound track: extract/convert only when needed; keep
+            # SubRip-compatible text tracks directly from the source container.
             if not self.hardsub_all:
                 if e.sub_src.suffix.lower() == ".srt":
                     e.sub_enc = e.sub_src
@@ -400,14 +401,43 @@ class Project:
                     sub_track_info = e.sub_info.text_tracks[e.sub_track]
                     sub_fmt = (sub_track_info.format or "").lower()
                     sub_codec_id = (sub_track_info.codec_id or "").lower()
-                    convert_to_srt = not (
-                        sub_fmt in ("utf-8", "srt", "subrip")
+                    # If it's already plain SubRip-compatible text (SRT/UTF-8),
+                    # don't extract/re-encode a second copy; let mkvmerge pick
+                    # the subtitle stream directly from the original container.
+                    if (
+                        sub_fmt in ("subrip", "srt", "utf-8")
                         or sub_codec_id in ("s_text/utf8", "srt")
-                    )
-                    e.sub_enc = _extract_sub(e.sub_src, e.sub_info, e.sub_track, "sub", convert_to_srt)
-                e.sub_track = 0
-                e.sub_info = MediaInfo.parse(e.sub_enc)
-                print(f"Final sub source configured")
+                    ):
+                        print(
+                            f"Subtitle track {e.sub_track} is already SubRip-compatible "
+                            f"({sub_fmt or sub_codec_id}), keeping original stream for muxing"
+                        )
+                        e.sub_enc = e.sub_src
+                    else:
+                        # Timed Text / tx3g isn't a usable sidecar, always convert.
+                        convert_to_srt = not (
+                            sub_fmt in ("utf-8", "srt", "subrip")
+                            or sub_codec_id in ("s_text/utf8", "srt")
+                        )
+                        print(
+                            f"Subtitle track {e.sub_track} is {sub_fmt or sub_codec_id or 'unknown'}, "
+                            f"extracting/converting for muxing"
+                        )
+                        e.sub_enc = _extract_sub(
+                            e.sub_src,
+                            e.sub_info,
+                            e.sub_track,
+                            "sub",
+                            convert_to_srt,
+                        )
+                        e.sub_track = 0
+                        e.sub_info = MediaInfo.parse(e.sub_enc)
+                        print(f"Final sub source configured")
+
+                # .srt sidecars are always elementary tracks.
+                if e.sub_src.suffix.lower() == ".srt":
+                    e.sub_track = 0
+                    e.sub_info = MediaInfo.parse(e.sub_enc)
             elif not e.sub_enc:
                 e.sub_enc = e.sub_src
                 print(f"Final sub source configured")
