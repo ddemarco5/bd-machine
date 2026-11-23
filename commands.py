@@ -54,7 +54,7 @@ def extract_elementary_dts_audio(episode, out_path, profile, ui_manager: UIManag
         return None
     return out_path / filename
 
-def encode_video(episode, out_path, profile, crf, hardsub_all, fontsdir, ui_manager: UIManager, start_time=None, stop_time=None, cropstring=None, scalestring=None, videotune=None, keephdr=False) -> None:
+def encode_video(episode, out_path, profile, crf, hardsub_all, fontsdir, ui_manager: UIManager, start_time=None, stop_time=None, cropstring=None, scalestring=None, videotune=None, keephdr=False, two_pass=False) -> None:
   
     filename = "vid" + str(episode.ep_num)
     if keephdr:
@@ -83,11 +83,27 @@ def encode_video(episode, out_path, profile, crf, hardsub_all, fontsdir, ui_mana
         gpustring += ",disable_multiplane=1"
     
     if profile.video_codec == "hevc_nvenc":
-        # NVENC -cq is 8.8 fixed-point but the driver only honors the top 2 bits
-        # of the fractional byte (see constants.NVENC_CQ_STEP). Quantize here so
-        # every caller passes a value the encoder can actually act on.
-        crf = round(crf / constants.NVENC_CQ_STEP) * constants.NVENC_CQ_STEP
-        command = ["ffmpeg", "-y",      
+        if two_pass:
+            # crf holds the target video bitrate (bps). Open maxrate/bufsize to the
+            # level max so the multipass algorithm can allocate bits freely.
+            rate_args = ["-b:v", str(int(crf)),
+                         "-maxrate", profile.video_max_bitrate,
+                         "-bufsize", profile.video_max_bitrate,
+                         "-tier", "high",
+                         "-tune", "uhq",
+                         "-multipass", "fullres",
+                         "-lookahead_level", "auto"]
+        else:
+            # NVENC -cq is 8.8 fixed-point but the driver only honors the top 2 bits
+            # of the fractional byte (see constants.NVENC_CQ_STEP). Quantize here so
+            # every caller passes a value the encoder can actually act on.
+            crf = round(crf / constants.NVENC_CQ_STEP) * constants.NVENC_CQ_STEP
+            rate_args = ["-cq", str(crf),
+                         "-tune", "uhq",
+                         "-bufsize", "160M",
+                         "-tier", "high",
+                         "-lookahead_level", "3"]
+        command = ["ffmpeg", "-y",
                 "-v", "quiet",
                 "-hide_banner",
                 "-stats",
@@ -96,17 +112,13 @@ def encode_video(episode, out_path, profile, crf, hardsub_all, fontsdir, ui_mana
                 # "-pix_fmt", profile.pixel_format,
                 *level,
                 "-rc", "vbr",
-                "-cq", str(crf),
+                *rate_args,
                 "-preset", "p7",
-                "-tune", "hq",
                 "-spatial-aq", "1",
                 "-temporal-aq", "1",
                 "-b_ref_mode", "2",
-                "-bufsize", "160M",
                 "-profile:v", "main10",
-                "-tier", "main",
                 "-rc-lookahead", "40",
-                "-lookahead_level", "3",
                 "-map", "v:" + str(episode.vid_track),
                 "-map_metadata", "-1",
                     (out_path / filename).absolute()]

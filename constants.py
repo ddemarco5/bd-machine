@@ -1,8 +1,8 @@
 BD_SIZE = 25025314816 # bytes, BD-R single layer
 BD_DL_SIZE = 50050629632 # BD-R dual layer
 
-# THRESHHOLD = .02 # 2% size threshhold for now
 THRESHHOLD = .04 # 4% seems to be the best granularity we can get with nvenc cq mode
+TWO_PASS_THRESHHOLD = .02 # bitrate mode is precise, the 4% window only exists for CQ granularity
 THRESHHOLD_TARGET = THRESHHOLD / 2 # aim smack dab in the threshhold
 
 # Smallest CQ increment hevc_nvenc will actually act on. Although ffmpeg stores
@@ -36,6 +36,7 @@ class UBP_X700:
     # video_codec = "libx265"
     video_codec = "hevc_nvenc"
     video_level = "5.1"
+    video_max_bitrate = "160M" # HEVC L5.1 High tier max bitrate / CPB size
     pixel_format = "yuv420p10le"
     resolution = (3840,2160)
     

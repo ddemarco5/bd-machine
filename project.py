@@ -56,7 +56,8 @@ class Project:
         self.cropstring = None
         self.scalestring = None
         self.videotune = None
-        
+        self.two_pass = False # nvenc multipass in bitrate mode; current_crf/last_attempted_crf hold bps
+
         # Project state variables
         self.current_crf = None
         self.last_attempted_crf = None
@@ -214,7 +215,10 @@ class Project:
             q = constants.NVENC_CQ_STEP
             return math.ceil(crf / q) * q
         return crf
-        
+
+    def _rate_str(self, crf):
+        return f"{crf/1e6:.2f} Mbps" if self.two_pass else f"CRF {crf:.2f}"
+
     def add_episode(self, episode: Episode):
         """Register an already-built Episode with this project.
 
@@ -341,6 +345,10 @@ class Project:
             print("Low bitrate required to hit size requirements, if active 4k video, this will likely be insufficient.")
         elif proj_kbps >= 20000:
             print("We have so much overhead for bitrate here, it is likely more efficient to do a 2-pass encode instead.")
+            if self.profile.video_codec == "hevc_nvenc":
+                self.two_pass = input("Use 2-pass encoding? [y/N] ").strip().lower() == "y"
+                print(f"2-pass encoding {'enabled' if self.two_pass else 'disabled'}")
+                return
         input("press enter to confirm...")
 
     def extract_subs_and_fonts(self):
@@ -440,7 +448,7 @@ class Project:
             return
         print(f"Encoding video {ep.ep_num} - {ep.ep_name}")
         self.ui.update_episode(ep, len(self.episodes))
-        self.ui.update_status(f"Encoding video with CRF {crf:.2f}")
+        self.ui.update_status(f"Encoding video with {self._rate_str(crf)}")
         result = encode_video(ep,
                          out_path=self.workdir,
                          crf=crf,
@@ -451,6 +459,7 @@ class Project:
                          scalestring=self.scalestring,
                          videotune=self.videotune,
                          keephdr=self.hdr,
+                         two_pass=self.two_pass,
                          ui_manager=self.ui)
         if not result:
             print("fatal error encoding video")
@@ -621,7 +630,7 @@ class Project:
         print(f"Processed all audio with a total stream size of {self.total_audio_size} bytes")
         print(f"or {(self.total_audio_size / self.TARGET_SIZE)*100:.3f}% of the disc")
     
-    def check_size_threshhold(self):
+    def check_size_threshhold(self, thresh=constants.THRESHHOLD):
         # Calculate the total size
         self.total_project_size = 0
         for e in self.episodes:
@@ -632,18 +641,26 @@ class Project:
         print(f"Total project size is {self.total_project_size} bytes")
         percent_off = (self.total_project_size - self.TARGET_SIZE) / self.TARGET_SIZE
         
-        print(f"We are off by {percent_off*100}% and our goal is {constants.THRESHHOLD*100*-1}")
+        print(f"We are off by {percent_off*100}% and our goal is {thresh*100*-1}")
         return percent_off   
      
     # Intended to be run again and again in the state machine until the project threshhold is reached    
     def approach_threshhold(self, crf_hint=None) -> bool:
         # TODO: probably change all this logic to a state machine so nothing falls through the gaps
         # Logic to calculate the new crf mid-project
+        thresh = constants.TWO_PASS_THRESHHOLD if self.two_pass else constants.THRESHHOLD
+        # Video bytes we're aiming for in 2-pass mode (land mid-window, undersized)
+        vid_aim = self.TARGET_SIZE * (1 - thresh / 2) - self.total_audio_size
         if not self.last_percent_off:
             print("Haven't completed the first run")
-        elif self.last_percent_off <= 0 and self.last_percent_off > (constants.THRESHHOLD * -1):
+        elif self.last_percent_off <= 0 and self.last_percent_off > (thresh * -1):
             print("We've hit our size threshhold")
             return True
+        elif self.two_pass:
+            # 2-pass VBR is near-linear in size, so scale the video bitrate proportionally
+            vid_actual = self.total_project_size - self.total_audio_size
+            self.current_crf = self.last_attempted_crf * vid_aim / vid_actual
+            print(f"Off by {self.last_percent_off*100:.3f}%, rescaling video bitrate to {self.current_crf/1e6:.3f} Mbps")
         elif crf_hint and not self.last_attempted_crf :
             print(f"We got a hint on where to start, beginning with crf {crf_hint}")
             self.current_crf = crf_hint
@@ -685,7 +702,12 @@ class Project:
             for e in self.eps_to_process:
                 e.reset()
             # Figure out what crf to use
-            if crf_hint and not self.last_attempted_crf :
+            if self.two_pass and not self.last_attempted_crf:
+                if crf_hint:
+                    print("Ignoring crf hint, 2-pass mode uses a calculated bitrate")
+                self.current_crf = vid_aim * 8 / (self.total_duration / 1000)
+                print(f"First 2-pass attempt, targeting a video bitrate of {self.current_crf/1e6:.3f} Mbps")
+            elif crf_hint and not self.last_attempted_crf :
                 print(f"We got a hint on where to start, beginning with crf {crf_hint}")
                 self.current_crf = crf_hint
             elif not self.last_attempted_crf:
@@ -699,8 +721,9 @@ class Project:
         # doing anything else with it — keeps the value we hand to the
         # encoder, store as last_attempted_crf, and feed to fine_tune_model
         # identical to what actually ran.
-        self.current_crf = self._snap_crf(self.current_crf)
-        if self.profile.video_codec == "hevc_nvenc" and self.last_attempted_crf is not None:
+        if not self.two_pass:
+            self.current_crf = self._snap_crf(self.current_crf)
+        if not self.two_pass and self.profile.video_codec == "hevc_nvenc" and self.last_attempted_crf is not None:
             prev_q = self._snap_crf(self.last_attempted_crf)
             print(f"Checking for CQ stall between {prev_q} and {self.current_crf}")
             if self.current_crf == prev_q:
@@ -712,14 +735,15 @@ class Project:
                 self.current_crf = prev_q + constants.NVENC_CQ_STEP
                 print(f"Stalled at CQ {prev_q} while oversized; bumping to {self.current_crf}")
 
-        print(f"Encoding the project with a crf of {self.current_crf}, last attempted was {self.last_attempted_crf}")
+        print(f"Encoding the project with {self._rate_str(self.current_crf)}, last attempted was {self.last_attempted_crf}")
         self.encode_episodes(self.eps_to_process, self.current_crf)
         self.last_attempted_crf = self.current_crf
-        self.last_percent_off = self.check_size_threshhold()
+        self.last_percent_off = self.check_size_threshhold(thresh)
         self._record_size_history(self.last_percent_off)
-        # check_size_threshhold sets self.total_project_size, we can use it to calculate the data for our fine-tuner
-        project_bitrate = (self.total_project_size * 8) / self.total_duration # we want this in bits/s
-        self.fine_tune_model.add_data_point(self.last_attempted_crf, project_bitrate)
+        if not self.two_pass:
+            # check_size_threshhold sets self.total_project_size, we can use it to calculate the data for our fine-tuner
+            project_bitrate = (self.total_project_size * 8) / self.total_duration # we want this in bits/s
+            self.fine_tune_model.add_data_point(self.last_attempted_crf, project_bitrate)
         return False
         # We're all set to loop another time
 
@@ -737,7 +761,7 @@ class Project:
 
             # Update overall progress
             self.ui.update_overall_progress(current_idx-1, total_eps)
-            self.ui.update_status(f"CRF {crf:.2f} | Processing {e.ep_name}")
+            self.ui.update_status(f"{self._rate_str(crf)} | Processing {e.ep_name}")
 
             # We haven't encoded
             if not e.vid_enc:
@@ -780,7 +804,9 @@ class Project:
                 continue
             elif self.project_state is self.state.PROFILE:
                 # profile our video if we haven't yet
-                if not crf_hint:
+                if self.two_pass:
+                    print("2-pass mode, no need to profile")
+                elif not crf_hint:
                     self.ui.update_status("Profiling CRF curve...")
                     self.profile_crf_curve()
                 else:
