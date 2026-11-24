@@ -1,7 +1,6 @@
-numpy
-pathlib
-pymediainfo
-scipy
-blessed
-pyyaml
-srt
+numpy>=2.5.5
+pymediainfo>=7.0.1
+scipy>=1.18.1
+blessed>=1.53.0
+pyyaml>=6.0.4
+srt>=3.5.3
